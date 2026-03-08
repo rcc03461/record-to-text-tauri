@@ -12,9 +12,18 @@ function App() {
   const [history, setHistory] = useState([]);
   const [playingId, setPlayingId] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const audioRef = useRef(new Audio());
 
   useEffect(() => {
+    // 監聽右鍵點擊來切換歷史紀錄
+    const handleContextMenu = (e) => {
+      e.preventDefault();
+      setShowHistory((prev) => !prev);
+    };
+
+    window.addEventListener("contextmenu", handleContextMenu);
+
     // Check if API key exists
     invoke("get_api_key").then((key) => {
       if (!key) {
@@ -79,6 +88,7 @@ function App() {
     });
 
     return () => {
+      window.removeEventListener("contextmenu", handleContextMenu);
       unlistenResult.then((f) => f());
       unlistenStatus.then((f) => f());
       unlistenError.then((f) => f());
@@ -189,7 +199,11 @@ function App() {
   };
 
   return (
-    <main className="container">
+    <main className={`container ${showHistory ? 'expanded' : 'minimal'}`}>
+      <div className="drag-handle" data-tauri-drag-region>
+        <span className="drag-icon">⋮⋮</span>
+      </div>
+      
       {isDragging && (
         <div className="drop-overlay">
           <div className="drop-message">
@@ -198,12 +212,6 @@ function App() {
           </div>
         </div>
       )}
-      <div className="header-actions">
-        <h1>錄音轉文字 (Qwen ASR)</h1>
-        <button className="reset-btn" onClick={handleForceReset} title="重置錄音狀態">
-          🔄
-        </button>
-      </div>
 
       {showApiKeyInput && (
         <div className="api-key-modal">
@@ -247,14 +255,19 @@ function App() {
           <div className="transcription-section">
             <div className="section-header">
               <h3>目前轉換結果：</h3>
-              {transcription && (
-                <button 
-                  className="copy-btn-small" 
-                  onClick={() => copyToClipboard(transcription)}
-                >
-                  📄 複製全部
+              <div className="header-buttons">
+                {transcription && (
+                  <button 
+                    className="copy-btn-small" 
+                    onClick={() => copyToClipboard(transcription)}
+                  >
+                    📄 複製全部
+                  </button>
+                )}
+                <button className="reset-btn-small" onClick={handleForceReset} title="重置錄音狀態">
+                  🔄
                 </button>
-              )}
+              </div>
             </div>
             <textarea
               readOnly
@@ -264,45 +277,50 @@ function App() {
           </div>
         </div>
 
-        <div className="history-panel">
-          <h3>歷史紀錄</h3>
-          <div className="history-list">
-            {history.length === 0 ? (
-              <p className="no-history">暫無紀錄</p>
-            ) : (
-              history.map((item) => (
-                <div key={item.id} className="history-item">
-                  <div className="history-item-header">
-                    <span className="timestamp">{formatDate(item.timestamp)}</span>
-                    <div className="history-actions">
-                      <button 
-                        onClick={() => playHistoryItem(item)}
-                        className={`play-btn ${playingId === item.id ? "playing" : ""}`}
-                      >
-                        {playingId === item.id ? "⏸️" : "▶️"}
-                      </button>
-                      <button 
-                        onClick={() => copyToClipboard(item.text)}
-                        className="copy-btn-small"
-                        title="複製文字"
-                      >
-                        📄
-                      </button>
-                      <button 
-                        onClick={() => deleteHistoryItem(item.id)}
-                        className="delete-btn-small"
-                        title="刪除"
-                      >
-                        🗑️
-                      </button>
+        {showHistory && (
+          <div className="history-panel">
+            <div className="history-header">
+              <h3>歷史紀錄</h3>
+              <button className="close-history-btn" onClick={() => setShowHistory(false)}>✕</button>
+            </div>
+            <div className="history-list">
+              {history.length === 0 ? (
+                <p className="no-history">暫無紀錄</p>
+              ) : (
+                history.map((item) => (
+                  <div key={item.id} className="history-item">
+                    <div className="history-item-header">
+                      <span className="timestamp">{formatDate(item.timestamp)}</span>
+                      <div className="history-actions">
+                        <button 
+                          onClick={() => playHistoryItem(item)}
+                          className={`play-btn ${playingId === item.id ? "playing" : ""}`}
+                        >
+                          {playingId === item.id ? "⏸️" : "▶️"}
+                        </button>
+                        <button 
+                          onClick={() => copyToClipboard(item.text)}
+                          className="copy-btn-small"
+                          title="複製文字"
+                        >
+                          📄
+                        </button>
+                        <button 
+                          onClick={() => deleteHistoryItem(item.id)}
+                          className="delete-btn-small"
+                          title="刪除"
+                        >
+                          🗑️
+                        </button>
+                      </div>
                     </div>
+                    <div className="history-text">{item.text}</div>
                   </div>
-                  <div className="history-text">{item.text}</div>
-                </div>
-              ))
-            )}
+                ))
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </main>
   );

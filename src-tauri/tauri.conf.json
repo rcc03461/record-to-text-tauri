@@ -14,8 +14,11 @@
       {
         "label": "main",
         "title": "records-to-text",
-        "width": 800,
-        "height": 600
+        "width": 400,
+        "height": 400,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "transparent": true
       }
     ],
     "security": {
