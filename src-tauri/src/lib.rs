@@ -2,14 +2,19 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_store::StoreExt;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use std::process::Stdio;
 
 struct RecordingState {
     is_recording: Mutex<bool>,
     stop_sender: Mutex<Option<oneshot::Sender<()>>>,
+    model_process: Mutex<Option<tokio::process::Child>>,
+    model_stdin: Mutex<Option<BufWriter<tokio::process::ChildStdin>>>,
+    model_stdout: Mutex<Option<BufReader<tokio::process::ChildStdout>>>,
 }
 
 impl RecordingState {
@@ -17,6 +22,9 @@ impl RecordingState {
         Self {
             is_recording: Mutex::new(false),
             stop_sender: Mutex::new(None),
+            model_process: Mutex::new(None),
+            model_stdin: Mutex::new(None),
+            model_stdout: Mutex::new(None),
         }
     }
 }
@@ -40,13 +48,13 @@ async fn start_recording(
     state: State<'_, Arc<RecordingState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    let mut is_recording = state.is_recording.lock().unwrap();
+    let mut is_recording = state.is_recording.lock().await;
     if *is_recording {
         return Err("Already recording".to_string());
     }
 
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
-    *state.stop_sender.lock().unwrap() = Some(stop_tx);
+    *state.stop_sender.lock().await = Some(stop_tx);
     *is_recording = true;
 
     let app_handle_clone = app_handle.clone();
@@ -63,12 +71,12 @@ async fn start_recording(
 
 #[tauri::command]
 async fn stop_recording(state: State<'_, Arc<RecordingState>>) -> Result<String, String> {
-    let mut is_recording = state.is_recording.lock().unwrap();
+    let mut is_recording = state.is_recording.lock().await;
     if !*is_recording {
         return Err("Not recording".to_string());
     }
 
-    if let Some(stop_tx) = state.stop_sender.lock().unwrap().take() {
+    if let Some(stop_tx) = state.stop_sender.lock().await.take() {
         let _ = stop_tx.send(());
     }
     *is_recording = false;
@@ -78,8 +86,8 @@ async fn stop_recording(state: State<'_, Arc<RecordingState>>) -> Result<String,
 
 #[tauri::command]
 async fn force_reset_recording(state: State<'_, Arc<RecordingState>>) -> Result<(), String> {
-    let mut is_recording = state.is_recording.lock().unwrap();
-    if let Some(stop_tx) = state.stop_sender.lock().unwrap().take() {
+    let mut is_recording = state.is_recording.lock().await;
+    if let Some(stop_tx) = state.stop_sender.lock().await.take() {
         let _ = stop_tx.send(());
     }
     *is_recording = false;
@@ -124,7 +132,7 @@ fn record_system_audio(
     let wav_path = temp_dir.join(format!("{}.wav", file_id));
 
     let writer = WavWriter::create(&wav_path, spec)?;
-    let writer = Arc::new(Mutex::new(Some(writer)));
+    let writer = Arc::new(std::sync::Mutex::new(Some(writer)));
     let writer_clone = Arc::clone(&writer);
 
     let stream = match config.sample_format() {
@@ -242,6 +250,7 @@ async fn process_dropped_file(
 }
 
 async fn process_asr(wav_path: PathBuf, app_handle: tauri::AppHandle) -> anyhow::Result<()> {
+    let state = app_handle.state::<Arc<RecordingState>>();
     let store = app_handle
         .store("config.json")
         .map_err(|e| anyhow::anyhow!("儲存設定讀取失敗: {}", e))?;
@@ -251,50 +260,88 @@ async fn process_asr(wav_path: PathBuf, app_handle: tauri::AppHandle) -> anyhow:
         .unwrap_or("cloud".to_string());
 
     let text = if model == "local" {
-        app_handle.emit("asr-status", "正在啟動本地模型 (SenseVoice)...")?;
-        
-        // 嘗試在開發環境與打包環境中找到腳本
-        // 在開發環境中，腳本通常在專案根目錄
-        let mut script_path = PathBuf::from("transcribe_local.py");
-        if !script_path.exists() {
-            // 如果不在當前目錄，嘗試往上一層找 (從 src-tauri 往專案根目錄)
-            script_path = PathBuf::from("../transcribe_local.py");
-        }
-        
-        // 如果還是找不到，可以嘗試從資源目錄獲取 (未來打包時需要)
-        if !script_path.exists() {
-            if let Ok(resource_path) = app_handle.path().resource_dir() {
-                let res_script = resource_path.join("transcribe_local.py");
-                if res_script.exists() {
-                    script_path = res_script;
-                }
+        // 確保伺服器已啟動
+        let mut model_process_lock = state.model_process.lock().await;
+        let mut is_running = false;
+        if let Some(child) = model_process_lock.as_mut() {
+            if let Ok(None) = child.try_wait() {
+                is_running = true;
             }
         }
 
-        if !script_path.exists() {
-            return Err(anyhow::anyhow!("找不到本地轉錄腳本: transcribe_local.py"));
+        if !is_running {
+            app_handle.emit("asr-status", "正在啟動本地模型 (SenseVoice)...")?;
+            
+            let mut script_path = PathBuf::from("transcribe_local.py");
+            if !script_path.exists() {
+                script_path = PathBuf::from("../transcribe_local.py");
+            }
+            if !script_path.exists() {
+                if let Ok(resource_path) = app_handle.path().resource_dir() {
+                    let res_script = resource_path.join("transcribe_local.py");
+                    if res_script.exists() {
+                        script_path = res_script;
+                    }
+                }
+            }
+
+            if !script_path.exists() {
+                return Err(anyhow::anyhow!("找不到本地轉錄腳本: transcribe_local.py"));
+            }
+
+            let mut child = tokio::process::Command::new("python")
+                .args(&[script_path.to_str().unwrap(), "--server"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| anyhow::anyhow!("本地伺服器啟動失敗: {}", e))?;
+
+            let stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("無法開啟 stdin"))?;
+            let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("無法開啟 stdout"))?;
+
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            
+            // 等待 "ready" 信號
+            reader.read_line(&mut line).await?;
+            let ready_msg: serde_json::Value = serde_json::from_str(&line)
+                .map_err(|e| anyhow::anyhow!("伺服器響應無效: {}, raw: {}", e, line))?;
+            
+            if ready_msg["status"] != "ready" {
+                return Err(anyhow::anyhow!("伺服器啟動失敗: {}", line));
+            }
+
+            *model_process_lock = Some(child);
+            *state.model_stdin.lock().await = Some(BufWriter::new(stdin));
+            *state.model_stdout.lock().await = Some(reader);
         }
-        
-        let output = tokio::process::Command::new("python")
-            .args(&[script_path.to_str().unwrap(), wav_path.to_str().unwrap()])
-            .output()
-            .await
-            .map_err(|e| anyhow::anyhow!("本地轉錄啟動失敗 (請確認已安裝 Python): {}", e))?;
+        drop(model_process_lock);
 
-        if !output.status.success() {
-            let err_text = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("本地轉錄失敗: {}", err_text));
+        app_handle.emit("asr-status", "正在進行本地轉錄...")?;
+
+        let mut stdin_lock = state.model_stdin.lock().await;
+        let mut stdout_lock = state.model_stdout.lock().await;
+
+        if let (Some(stdin), Some(stdout)) = (stdin_lock.as_mut(), stdout_lock.as_mut()) {
+            let input = format!("{}\n", wav_path.to_str().unwrap());
+            stdin.write_all(input.as_bytes()).await?;
+            stdin.flush().await?;
+
+            let mut line = String::new();
+            stdout.read_line(&mut line).await?;
+            
+            let result: serde_json::Value = serde_json::from_str(&line)
+                .map_err(|e| anyhow::anyhow!("無法解析本地模型輸出: {}, raw: {}", e, line))?;
+
+            if let Some(err) = result["error"].as_str() {
+                return Err(anyhow::anyhow!("本地模型錯誤: {}", err));
+            }
+
+            result["text"].as_str().unwrap_or("").to_string()
+        } else {
+            return Err(anyhow::anyhow!("本地伺服器狀態異常"));
         }
-
-        let output_text = String::from_utf8_lossy(&output.stdout);
-        let result: serde_json::Value = serde_json::from_str(&output_text)
-            .map_err(|e| anyhow::anyhow!("無法解析本地模型輸出: {}, raw: {}", e, output_text))?;
-
-        if let Some(err) = result["error"].as_str() {
-            return Err(anyhow::anyhow!("本地模型錯誤: {}", err));
-        }
-
-        result["text"].as_str().unwrap_or("").to_string()
     } else {
         // 雲端轉換邏輯 (DashScope)
         app_handle.emit("asr-status", "正在讀取 API Key...")?;
