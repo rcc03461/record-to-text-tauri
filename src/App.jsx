@@ -162,6 +162,13 @@ function App() {
     setTimeout(() => setStatus(""), 2000);
   }
 
+  const handleClearTranscription = () => {
+    setTranscription("");
+    const oldStatus = status;
+    setStatus("已清除內容");
+    setTimeout(() => setStatus(oldStatus), 2000);
+  };
+
   const copyToClipboard = async (text) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -292,12 +299,22 @@ function App() {
               <h3>目前轉換結果：</h3>
               <div className="header-buttons">
                 {transcription && (
-                  <button 
-                    className="copy-btn-small" 
-                    onClick={() => copyToClipboard(transcription)}
-                  >
-                    📄 複製全部
-                  </button>
+                  <>
+                    <button 
+                      className="copy-btn-small" 
+                      onClick={() => copyToClipboard(transcription)}
+                      title="複製全部"
+                    >
+                      📄 複製
+                    </button>
+                    <button 
+                      className="delete-btn-small" 
+                      onClick={handleClearTranscription}
+                      title="清除目前內容"
+                    >
+                      🗑️ 清除
+                    </button>
+                  </>
                 )}
                 <button className="reset-btn-small" onClick={handleForceReset} title="重置錄音狀態">
                   🔄
@@ -305,8 +322,8 @@ function App() {
               </div>
             </div>
             <textarea
-              readOnly
               value={transcription}
+              onChange={(e) => setTranscription(e.target.value)}
               placeholder="錄音結束後將在此顯示文字..."
             />
           </div>
