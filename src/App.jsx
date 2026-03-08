@@ -1,7 +1,10 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
+
+const appWindow = getCurrentWindow();
 
 function App() {
   const [isRecording, setIsRecording] = useState(false);
@@ -202,6 +205,7 @@ function App() {
     <main className={`container ${showHistory ? 'expanded' : 'minimal'}`}>
       <div className="drag-handle" data-tauri-drag-region>
         <span className="drag-icon">⋮⋮</span>
+        <button className="close-app-btn" onClick={() => appWindow.close()}>✕</button>
       </div>
       
       {isDragging && (

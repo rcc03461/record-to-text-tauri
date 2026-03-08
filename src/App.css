@@ -45,6 +45,28 @@ body {
   cursor: grab;
   user-select: none;
   flex-shrink: 0;
+  position: relative;
+}
+
+.close-app-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  font-size: 14px;
+  color: #999;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.2s;
+  -webkit-app-region: no-drag;
+}
+
+.close-app-btn:hover {
+  background: #ff4d4f;
+  color: white;
 }
 
 .drag-icon {
