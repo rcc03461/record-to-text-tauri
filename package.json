@@ -1,7 +1,8 @@
 {
   "name": "records-to-text",
-  "private": true,
   "version": "0.1.0",
+  "description": "A lightweight desktop widget for system audio recording and transcription using Qwen ASR.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
