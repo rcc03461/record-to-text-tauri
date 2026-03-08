@@ -1,0 +1,8 @@
+funasr
+torch
+torchaudio
+modelscope
+huggingface_hub
+numpy
+sentencepiece
+librosa

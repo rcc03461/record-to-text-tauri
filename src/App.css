@@ -97,6 +97,46 @@ body {
   flex-direction: column;
   align-items: center;
   margin-bottom: 4px;
+  gap: 16px;
+}
+
+.model-selector {
+  display: flex;
+  background: rgba(0, 0, 0, 0.05);
+  padding: 4px;
+  border-radius: 12px;
+  -webkit-app-region: no-drag;
+}
+
+.model-btn {
+  padding: 6px 16px;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #666;
+  transition: all 0.2s;
+}
+
+.model-btn.active {
+  background: white;
+  color: #007aff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.model-btn:hover:not(.active) {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.local-hint {
+  font-size: 11px;
+  color: #888;
+  margin-top: -8px;
+  background: rgba(0, 122, 255, 0.05);
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px dashed rgba(0, 122, 255, 0.2);
 }
 
 .record-button {

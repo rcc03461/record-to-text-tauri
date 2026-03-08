@@ -11,6 +11,7 @@ function App() {
   const [transcription, setTranscription] = useState("");
   const [status, setStatus] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [model, setModel] = useState("cloud"); // "cloud" or "local"
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [history, setHistory] = useState([]);
   const [playingId, setPlayingId] = useState(null);
@@ -27,12 +28,15 @@ function App() {
 
     window.addEventListener("contextmenu", handleContextMenu);
 
-    // Check if API key exists
-    invoke("get_api_key").then((key) => {
-      if (!key) {
+    // Check model and API key
+    Promise.all([
+      invoke("get_model"),
+      invoke("get_api_key")
+    ]).then(([currentModel, key]) => {
+      setModel(currentModel);
+      setApiKey(key);
+      if (currentModel === "cloud" && !key) {
         setShowApiKeyInput(true);
-      } else {
-        setApiKey(key);
       }
     });
 
@@ -122,7 +126,7 @@ function App() {
         setIsRecording(false);
       }
     } else {
-      if (!apiKey) {
+      if (model === "cloud" && !apiKey) {
         setShowApiKeyInput(true);
         return;
       }
@@ -140,6 +144,14 @@ function App() {
     if (apiKey) {
       await invoke("set_api_key", { api_key: apiKey });
       setShowApiKeyInput(false);
+    }
+  }
+
+  async function handleModelChange(newModel) {
+    setModel(newModel);
+    await invoke("set_model", { model: newModel });
+    if (newModel === "cloud" && !apiKey) {
+      setShowApiKeyInput(true);
     }
   }
 
@@ -235,6 +247,20 @@ function App() {
       <div className="main-layout">
         <div className="left-panel">
           <div className="recording-section">
+            <div className="model-selector">
+              <button 
+                className={`model-btn ${model === 'cloud' ? 'active' : ''}`}
+                onClick={() => handleModelChange('cloud')}
+              >
+                雲端 (Qwen)
+              </button>
+              <button 
+                className={`model-btn ${model === 'local' ? 'active' : ''}`}
+                onClick={() => handleModelChange('local')}
+              >
+                本地 (SenseVoice)
+              </button>
+            </div>
             <button
               className={`record-button ${isRecording ? "recording" : ""}`}
               onClick={handleToggleRecording}
@@ -252,8 +278,13 @@ function App() {
               )}
             </button>
             <p className={`status ${status.startsWith("錯誤") ? "error" : ""}`}>
-              {status}
+              {status || (isRecording ? "正在錄音..." : "點擊開始錄音")}
             </p>
+            {model === 'local' && (
+              <div className="local-hint">
+                💡 使用本地模型需安裝 Python 及 <code>pip install -r requirements.txt</code>
+              </div>
+            )}
           </div>
 
           <div className="transcription-section">

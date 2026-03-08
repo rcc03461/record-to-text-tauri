@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_store::StoreExt;
 use tokio::sync::oneshot;
-use uuid::Uuid;
 
 struct RecordingState {
     is_recording: Mutex<bool>,
@@ -243,75 +242,123 @@ async fn process_dropped_file(
 }
 
 async fn process_asr(wav_path: PathBuf, app_handle: tauri::AppHandle) -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()?;
-
     let store = app_handle
         .store("config.json")
         .map_err(|e| anyhow::anyhow!("儲存設定讀取失敗: {}", e))?;
     
-    app_handle.emit("asr-status", "正在讀取 API Key...")?;
-    let api_key = match store.get("qwen_api_key") {
-        Some(key) => key.as_str().unwrap_or("").to_string(),
-        None => {
-            app_handle.emit("asr-error", "未找到 API Key，請重新輸入")?;
-            return Ok(());
+    let model = store.get("transcription_model")
+        .map(|v| v.as_str().unwrap_or("cloud").to_string())
+        .unwrap_or("cloud".to_string());
+
+    let text = if model == "local" {
+        app_handle.emit("asr-status", "正在啟動本地模型 (SenseVoice)...")?;
+        
+        // 嘗試在開發環境與打包環境中找到腳本
+        // 在開發環境中，腳本通常在專案根目錄
+        let mut script_path = PathBuf::from("transcribe_local.py");
+        if !script_path.exists() {
+            // 如果不在當前目錄，嘗試往上一層找 (從 src-tauri 往專案根目錄)
+            script_path = PathBuf::from("../transcribe_local.py");
         }
-    };
-
-    if api_key.is_empty() {
-        app_handle.emit("asr-error", "API Key 為空，請重新輸入")?;
-        return Ok(());
-    }
-
-    // 根據官方文件使用 OpenAI 相容模式
-    app_handle.emit("asr-status", "正在處理音檔數據...")?;
-    let file_bytes = std::fs::read(&wav_path)?;
-    let base64_audio = b64_encode(&file_bytes);
-    // 修正：在 OpenAI 相容模式下，data 欄位應為 Data URI 格式
-    let data_uri = format!("data:audio/wav;base64,{}", base64_audio);
-
-    // 2. 發起 OpenAI 相容模式的轉換請求
-    app_handle.emit("asr-status", "正在發起轉換請求...")?;
-
-    let transcribe_resp = client
-        .post("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&serde_json::json!({
-            "model": "qwen3-asr-flash",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_audio",
-                            "input_audio": {
-                                "data": data_uri
-                            }
-                        }
-                    ]
-                }
-            ],
-            "extra_body": {
-                "asr_options": {
-                    "enable_itn": true
+        
+        // 如果還是找不到，可以嘗試從資源目錄獲取 (未來打包時需要)
+        if !script_path.exists() {
+            if let Ok(resource_path) = app_handle.path().resource_dir() {
+                let res_script = resource_path.join("transcribe_local.py");
+                if res_script.exists() {
+                    script_path = res_script;
                 }
             }
-        }))
-        .send()
-        .await?;
+        }
 
-    if !transcribe_resp.status().is_success() {
-        let status = transcribe_resp.status();
-        let err_text = transcribe_resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("轉換失敗 ({}): {}", status, err_text));
-    }
+        if !script_path.exists() {
+            return Err(anyhow::anyhow!("找不到本地轉錄腳本: transcribe_local.py"));
+        }
+        
+        let output = tokio::process::Command::new("python")
+            .args(&[script_path.to_str().unwrap(), wav_path.to_str().unwrap()])
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("本地轉錄啟動失敗 (請確認已安裝 Python): {}", e))?;
 
-    let transcribe_json: serde_json::Value = transcribe_resp.json().await?;
-    
-    // 獲取轉換後的文字
-    if let Some(text) = transcribe_json["choices"][0]["message"]["content"].as_str() {
+        if !output.status.success() {
+            let err_text = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("本地轉錄失敗: {}", err_text));
+        }
+
+        let output_text = String::from_utf8_lossy(&output.stdout);
+        let result: serde_json::Value = serde_json::from_str(&output_text)
+            .map_err(|e| anyhow::anyhow!("無法解析本地模型輸出: {}, raw: {}", e, output_text))?;
+
+        if let Some(err) = result["error"].as_str() {
+            return Err(anyhow::anyhow!("本地模型錯誤: {}", err));
+        }
+
+        result["text"].as_str().unwrap_or("").to_string()
+    } else {
+        // 雲端轉換邏輯 (DashScope)
+        app_handle.emit("asr-status", "正在讀取 API Key...")?;
+        let api_key = match store.get("qwen_api_key") {
+            Some(key) => key.as_str().unwrap_or("").to_string(),
+            None => {
+                app_handle.emit("asr-error", "未找到 API Key，請重新輸入")?;
+                return Ok(());
+            }
+        };
+
+        if api_key.is_empty() {
+            app_handle.emit("asr-error", "API Key 為空，請重新輸入")?;
+            return Ok(());
+        }
+
+        app_handle.emit("asr-status", "正在處理音檔數據...")?;
+        let file_bytes = std::fs::read(&wav_path)?;
+        let base64_audio = b64_encode(&file_bytes);
+        let data_uri = format!("data:audio/wav;base64,{}", base64_audio);
+
+        app_handle.emit("asr-status", "正在發起雲端轉換請求...")?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
+
+        let transcribe_resp = client
+            .post("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&serde_json::json!({
+                "model": "qwen3-asr-flash",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": data_uri
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "extra_body": {
+                    "asr_options": {
+                        "enable_itn": true
+                    }
+                }
+            }))
+            .send()
+            .await?;
+
+        if !transcribe_resp.status().is_success() {
+            let status = transcribe_resp.status();
+            let err_text = transcribe_resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("雲端轉換失敗 ({}): {}", status, err_text));
+        }
+
+        let transcribe_json: serde_json::Value = transcribe_resp.json().await?;
+        transcribe_json["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string()
+    };
+
+    if !text.is_empty() {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -320,7 +367,7 @@ async fn process_asr(wav_path: PathBuf, app_handle: tauri::AppHandle) -> anyhow:
         let history_item = HistoryItem {
             id: uuid::Uuid::new_v4().to_string(),
             timestamp,
-            text: text.to_string(),
+            text: text.clone(),
             audio_path: wav_path.to_string_lossy().to_string(),
         };
 
@@ -332,7 +379,6 @@ async fn process_asr(wav_path: PathBuf, app_handle: tauri::AppHandle) -> anyhow:
                 .unwrap_or_default();
             
             history.insert(0, history_item.clone());
-            // 只保留最近 50 筆
             if history.len() > 50 {
                 history.truncate(50);
             }
@@ -346,8 +392,8 @@ async fn process_asr(wav_path: PathBuf, app_handle: tauri::AppHandle) -> anyhow:
             history_item: Some(history_item)
         })?;
         app_handle.emit("asr-status", "轉換成功")?;
-    } else {
-        return Err(anyhow::anyhow!("未能解析轉換文字: {:?}", transcribe_json));
+    } else if model == "cloud" {
+        return Err(anyhow::anyhow!("未能從雲端解析轉換文字"));
     }
 
     Ok(())
@@ -419,6 +465,25 @@ async fn get_api_key(app_handle: tauri::AppHandle) -> Result<Option<String>, Str
     Ok(key)
 }
 
+#[tauri::command]
+async fn set_model(app_handle: tauri::AppHandle, model: String) -> Result<(), String> {
+    let store = app_handle
+        .store("config.json")
+        .map_err(|e| e.to_string())?;
+    store.set("transcription_model", serde_json::Value::String(model));
+    store.save().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_model(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let store = app_handle
+        .store("config.json")
+        .map_err(|e| e.to_string())?;
+    let model = store.get("transcription_model").map(|v: serde_json::Value| v.as_str().unwrap_or("cloud").to_string()).unwrap_or("cloud".to_string());
+    Ok(model)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let recording_state = Arc::new(RecordingState::new());
@@ -433,6 +498,8 @@ pub fn run() {
             force_reset_recording,
             set_api_key,
             get_api_key,
+            set_model,
+            get_model,
             get_history,
             delete_history_item,
             play_audio,
