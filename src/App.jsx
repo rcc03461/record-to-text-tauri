@@ -11,6 +11,7 @@ function App() {
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [history, setHistory] = useState([]);
   const [playingId, setPlayingId] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);
   const audioRef = useRef(new Audio());
 
   useEffect(() => {
@@ -55,10 +56,35 @@ function App() {
       setPlayingId(null);
     };
 
+    // 監聽拖放事件
+    const unlistenDragDrop = listen("tauri://drag-drop", (event) => {
+      setIsDragging(false);
+      const paths = event.payload.paths;
+      if (paths && paths.length > 0) {
+        const path = paths[0];
+        setStatus("正在處理拖入的檔案...");
+        invoke("process_dropped_file", { path })
+          .catch((err) => {
+            setStatus("錯誤: " + err);
+          });
+      }
+    });
+
+    const unlistenDragEnter = listen("tauri://drag-enter", () => {
+      setIsDragging(true);
+    });
+
+    const unlistenDragLeave = listen("tauri://drag-leave", () => {
+      setIsDragging(false);
+    });
+
     return () => {
       unlistenResult.then((f) => f());
       unlistenStatus.then((f) => f());
       unlistenError.then((f) => f());
+      unlistenDragDrop.then((f) => f());
+      unlistenDragEnter.then((f) => f());
+      unlistenDragLeave.then((f) => f());
       audioRef.current.pause();
     };
   }, []);
@@ -164,6 +190,14 @@ function App() {
 
   return (
     <main className="container">
+      {isDragging && (
+        <div className="drop-overlay">
+          <div className="drop-message">
+            <span className="drop-icon">📥</span>
+            <p>放開檔案以開始轉換</p>
+          </div>
+        </div>
+      )}
       <div className="header-actions">
         <h1>錄音轉文字 (Qwen ASR)</h1>
         <button className="reset-btn" onClick={handleForceReset} title="重置錄音狀態">

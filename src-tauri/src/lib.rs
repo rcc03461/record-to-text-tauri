@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_store::StoreExt;
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 struct RecordingState {
     is_recording: Mutex<bool>,
@@ -170,6 +171,69 @@ fn record_system_audio(
     let app_handle_asr = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = process_asr(wav_path, app_handle_asr.clone()).await {
+            eprintln!("ASR error: {}", e);
+            let _ = app_handle_asr.emit("asr-error", format!("轉換錯誤: {}", e));
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn process_dropped_file(
+    app_handle: tauri::AppHandle,
+    path: String,
+) -> Result<(), String> {
+    let input_path = PathBuf::from(&path);
+    if !input_path.exists() {
+        return Err("檔案不存在".to_string());
+    }
+
+    let ext = input_path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ext != "mp3" && ext != "mp4" && ext != "wav" && ext != "m4a" && ext != "aac" {
+        return Err("不支持的檔案格式，請使用 MP3, MP4, WAV, M4A 或 AAC".to_string());
+    }
+
+    let temp_dir = app_handle.path().app_cache_dir().expect("Failed to get cache dir");
+    if !temp_dir.exists() {
+        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    }
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let output_wav_path = temp_dir.join(format!("dropped_{}.wav", timestamp));
+
+    app_handle.emit("asr-status", "正在轉換音檔 (ffmpeg)...").map_err(|e| e.to_string())?;
+
+    // 使用 tokio::process::Command 以免阻塞執行緒
+    let status = tokio::process::Command::new("ffmpeg")
+        .args(&[
+            "-i", path.as_str(),
+            "-vn", // 停用影片
+            "-acodec", "pcm_s16le",
+            "-ar", "16000",
+            "-ac", "1",
+            output_wav_path.to_str().unwrap(),
+            "-y" // 覆蓋現有檔案
+        ])
+        .status()
+        .await
+        .map_err(|e| format!("ffmpeg 執行失敗: {}", e))?;
+
+    if !status.success() {
+        return Err("ffmpeg 轉換失敗".to_string());
+    }
+
+    // 開始 ASR
+    let app_handle_asr = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = process_asr(output_wav_path, app_handle_asr.clone()).await {
             eprintln!("ASR error: {}", e);
             let _ = app_handle_asr.emit("asr-error", format!("轉換錯誤: {}", e));
         }
@@ -372,6 +436,7 @@ pub fn run() {
             get_history,
             delete_history_item,
             play_audio,
+            process_dropped_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
